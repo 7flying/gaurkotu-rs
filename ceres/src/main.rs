@@ -28,18 +28,32 @@ struct Follows {
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Updates {
-    updates: HashMap<String, AniInfo>,
+    updates: HashMap<String, AniMinInfo>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct AniInfo {
     info: AniMinInfo,
+    extra: AniExtraInfo,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct AniMinInfo {
     name: String,
     last_episode: i16,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct AniExtraInfo {
+    en_name: String,
+}
+
+impl Default for AniExtraInfo {
+    fn default() -> Self {
+        AniExtraInfo {
+            en_name: String::new(),
+        }
+    }
 }
 
 #[derive(BotCommands, Clone)]
@@ -52,8 +66,10 @@ enum Command {
     Help,
     #[command(description = "check if there are any anime updates.")]
     CheckAnime,
-    #[command(description = "updates the viewing progress of a series. ")]
+    #[command(description = "updates the viewing progress of a series.")]
     UpdateAnime,
+    #[command(description = "generate an id for a given name.")]
+    GenId(String),
 }
 
 #[derive(Clone, Default)]
@@ -79,7 +95,8 @@ fn schema() -> UpdateHandler<Box<dyn std::error::Error + Send + Sync + 'static>>
     let command_handler = teloxide::filter_command::<Command, _>()
         .branch(case![Command::Help].endpoint(command_help))
         .branch(case![Command::CheckAnime].endpoint(command_check_anime))
-        .branch(case![Command::UpdateAnime].endpoint(command_update_anime));
+        .branch(case![Command::UpdateAnime].endpoint(command_update_anime))
+        .branch(case![Command::GenId(anime)].endpoint(command_gen_id));
     let message_handler = Update::filter_message()
         .branch(command_handler)
         .branch(dptree::endpoint(invalid_state));
@@ -134,13 +151,12 @@ async fn command_update_anime(
     let follows = get_follows_vec().await;
     let mut buttons: Vec<Vec<InlineKeyboardButton>> = Vec::new();
     for f in follows {
-        let md = format!("{:x}", md5::compute(f.0));
         let name = if f.1.len() <= 128 {
             f.1
         } else {
             f.1[..128].to_owned()
         };
-        buttons.push([InlineKeyboardButton::callback(name, md)].to_vec());
+        buttons.push([InlineKeyboardButton::callback(name, format!("{}", &f.0))].to_vec());
     }
     let animes = InlineKeyboardMarkup::new(buttons);
     bot.send_message(msg.chat.id, "Which anime do you want to update?")
@@ -150,14 +166,58 @@ async fn command_update_anime(
     Ok(())
 }
 
+/// handles /genid {anime}
+async fn command_gen_id(bot: Bot, msg: Message, anime: String) -> Result<()> {
+    if !is_allowed_user(msg.chat.id) {
+        return Ok(());
+    }
+    bot.send_message(
+        msg.chat.id,
+        format!("id:{:x}", md5::compute(slugify(anime))),
+    )
+    .await?;
+    Ok(())
+}
+
 async fn update_given_anime(
     bot: Bot,
     dialogue: Dialogue<UpdateAnimeState, InMemStorage<UpdateAnimeState>>,
     q: CallbackQuery,
 ) -> HandlerResult {
     if let Some(anime) = &q.data {
-        bot.send_message(dialogue.chat_id(), format!("Got {anime} from the button!"))
+        let store_dir = env::var("BOT_STORAGE").expect("Error checking BOT_STORAGE");
+        let json_follows = store_dir.to_owned() + "/anime-following.json";
+        let follows_content = tokio::fs::read(json_follows)
+            .await
+            .expect("Error reading following file");
+        let mut following: Follows =
+            serde_json::from_slice(&follows_content).expect("Error deserializing following json");
+        if following.following.contains_key(anime) {
+            let mut info = following.following.get(anime).unwrap().to_owned();
+            info.info.last_episode += 1;
+            following
+                .following
+                .insert(anime.to_owned(), info.to_owned());
+
+            let json = serde_json::to_string_pretty(&following)?;
+            let mut file = File::create(store_dir.to_owned() + "/anime-following.json").await?;
+            file.write_all(json.as_bytes()).await?;
+            bot.send_message(
+                dialogue.chat_id(),
+                format!(
+                    "Updated {} to episode {}",
+                    info.extra.en_name, info.info.last_episode
+                ),
+            )
             .await?;
+        } else {
+            bot.send_message(
+                dialogue.chat_id(),
+                format!("I couldn't find {anime} in our follows"),
+            )
+            .await?;
+        }
+
         dialogue.exit().await?;
     }
     Ok(())
@@ -189,33 +249,44 @@ async fn check_updates(chat_id: ChatId, bot: &Bot) -> Result<()> {
 
     let eps = fetch_rss().await?;
     // we care about the ones that we are following, and out of those, the new updates
-    let mut notify: HashMap<String, AniInfo> = HashMap::new();
+    let mut store_update: HashMap<String, AniMinInfo> = HashMap::new();
+    let mut message_update: HashMap<String, AniMinInfo> = HashMap::new();
     for (id, ani) in eps.iter() {
         if !following.following.contains_key(id) {
             continue;
         }
         if (!updates.updates.contains_key(id)
-            && ani.info.last_episode > following.following.get(id).unwrap().info.last_episode)
+            && ani.last_episode > following.following.get(id).unwrap().info.last_episode)
             || (updates.updates.contains_key(id)
-                && ani.info.last_episode > updates.updates.get(id).unwrap().info.last_episode)
+                && ani.last_episode > updates.updates.get(id).unwrap().last_episode)
         {
-            notify.insert(id.to_owned(), ani.to_owned());
+            store_update.insert(id.to_owned(), ani.to_owned());
+            message_update.insert(
+                following
+                    .following
+                    .get(id)
+                    .unwrap()
+                    .extra
+                    .en_name
+                    .to_owned(),
+                ani.to_owned(),
+            );
         }
     }
-    if notify.values().len() == 0 {
+    if message_update.values().len() == 0 {
         bot.send_message(chat_id, "There are no updates!")
             .await
             .unwrap();
     } else {
         let mut message: String = "This is the latest anime update:\n".to_owned();
-        for ep in notify.values() {
+        for (ename, info) in message_update {
             message.push_str(&format!(
-                "— Episode {} for '{}' is out\n",
-                ep.info.last_episode, ep.info.name
+                "— Episode {} for '{}' is out ({})\n",
+                info.last_episode, ename, info.name
             ));
         }
         bot.send_message(chat_id, message).await.unwrap();
-        sync_updates(updates, notify, store_dir).await?;
+        sync_updates(updates, store_update, store_dir).await?;
     }
 
     Ok(())
@@ -223,7 +294,7 @@ async fn check_updates(chat_id: ChatId, bot: &Bot) -> Result<()> {
 
 async fn sync_updates(
     mut updates: Updates,
-    notify: HashMap<String, AniInfo>,
+    notify: HashMap<String, AniMinInfo>,
     store_dir: String,
 ) -> Result<()> {
     for (id, info) in notify {
@@ -235,7 +306,7 @@ async fn sync_updates(
     Ok(())
 }
 
-async fn fetch_rss() -> Result<HashMap<String, AniInfo>> {
+async fn fetch_rss() -> Result<HashMap<String, AniMinInfo>> {
     let https = HttpsConnector::new();
     let client = Client::builder().build::<_, hyper::Body>(https);
     let uri = ANIME_RSS.parse()?;
@@ -247,19 +318,17 @@ async fn fetch_rss() -> Result<HashMap<String, AniInfo>> {
         stuff.push_str(str::from_utf8(&chunk)?);
     }
     let feed = parser::parse(stuff.as_bytes()).unwrap();
-    let mut updates: HashMap<String, AniInfo> = HashMap::new();
+    let mut updates: HashMap<String, AniMinInfo> = HashMap::new();
     let re = Regex::new(r"([\w\W\s]+) - Episode ([\d\D]+)").unwrap();
     for et in feed.entries {
         if let Some(info) = re.captures(&et.title.unwrap().content) {
             let episode = info.get(2).map_or("", |m| m.as_str());
             let series = info.get(1).map_or("", |m| m.as_str());
             updates.insert(
-                slugify(series),
-                AniInfo {
-                    info: AniMinInfo {
-                        name: String::from(series),
-                        last_episode: episode.parse::<i16>().unwrap(),
-                    },
+                format!("{:x}", md5::compute(slugify(series))),
+                AniMinInfo {
+                    name: String::from(series),
+                    last_episode: episode.parse::<i16>().unwrap(),
                 },
             );
         }
@@ -277,7 +346,7 @@ async fn get_follows_vec() -> Vec<(String, String)> {
         serde_json::from_slice(&follows_content).expect("Error deserializing following json");
     let mut ret: Vec<(String, String)> = vec![];
     for (key, val) in following.following {
-        ret.push((key, val.info.name));
+        ret.push((key, val.extra.en_name));
     }
     ret.sort_unstable();
     ret
