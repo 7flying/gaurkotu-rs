@@ -117,16 +117,22 @@ async fn check_updates(chat_id: ChatId, bot: &Bot) -> Result<()> {
             notify.insert(id.to_owned(), ani.to_owned());
         }
     }
-
-    let mut message: String = "This is the latest anime update:\n".to_owned();
-    for ep in notify.values() {
-        message.push_str(&format!(
-            "— Episode {} for {} is out\n",
-            ep.info.last_episode, ep.info.name
-        ));
+    if notify.values().len() == 0 {
+        bot.send_message(chat_id, "There are no updates!")
+            .await
+            .unwrap();
+    } else {
+        let mut message: String = "This is the latest anime update:\n".to_owned();
+        for ep in notify.values() {
+            message.push_str(&format!(
+                "— Episode {} for {} is out\n",
+                ep.info.last_episode, ep.info.name
+            ));
+        }
+        bot.send_message(chat_id, message).await.unwrap();
+        sync_updates(updates, notify, store_dir).await?;
     }
-    bot.send_message(chat_id, message).await.unwrap();
-    sync_updates(updates, notify, store_dir).await?;
+
     Ok(())
 }
 
