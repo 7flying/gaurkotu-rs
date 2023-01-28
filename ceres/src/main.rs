@@ -7,11 +7,16 @@ use slug::slugify;
 use std::collections::HashMap;
 use std::env;
 use std::str;
+use teloxide::dispatching::dialogue::InMemStorage;
+use teloxide::dispatching::{dialogue, UpdateHandler};
+use teloxide::types::InlineKeyboardButton;
+use teloxide::types::InlineKeyboardMarkup;
 use teloxide::{prelude::*, utils::command::BotCommands};
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
+type HandlerResult = std::result::Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
 const ANIME_RSS: &str = "https://raw.githubusercontent.com/ArjixGamer/gogoanime-rss/main/gogoanime/gogoanime-rss-sub.xml";
 
@@ -37,15 +42,6 @@ struct AniMinInfo {
     last_episode: i16,
 }
 
-#[tokio::main]
-async fn main() -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    log::info!("Starting command bot...");
-    let bot = Bot::from_env();
-    Command::repl(bot, handle_command).await;
-
-    Ok(())
-}
-
 #[derive(BotCommands, Clone)]
 #[command(
     rename_rule = "lowercase",
@@ -56,35 +52,124 @@ enum Command {
     Help,
     #[command(description = "check if there are any anime updates.")]
     CheckAnime,
+    #[command(description = "updates the viewing progress of a series. ")]
+    UpdateAnime,
 }
 
-async fn handle_command(bot: Bot, msg: Message, cmd: Command) -> ResponseResult<()> {
-    // ignore messages from everyone else but us
+#[derive(Clone, Default)]
+enum UpdateAnimeState {
+    #[default]
+    UpdateAnime,
+}
+
+#[tokio::main]
+async fn main() {
+    log::info!("Starting command bot...");
+    let bot = Bot::from_env();
+    Dispatcher::builder(bot, schema())
+        .dependencies(dptree::deps![InMemStorage::<UpdateAnimeState>::new()])
+        .enable_ctrlc_handler()
+        .build()
+        .dispatch()
+        .await;
+}
+
+fn schema() -> UpdateHandler<Box<dyn std::error::Error + Send + Sync + 'static>> {
+    use dptree::case;
+    let command_handler = teloxide::filter_command::<Command, _>()
+        .branch(case![Command::Help].endpoint(command_help))
+        .branch(case![Command::CheckAnime].endpoint(command_check_anime))
+        .branch(case![Command::UpdateAnime].endpoint(command_update_anime));
+    let message_handler = Update::filter_message()
+        .branch(command_handler)
+        .branch(dptree::endpoint(invalid_state));
+    let callback_query_handler = Update::filter_callback_query()
+        .branch(case![UpdateAnimeState::UpdateAnime].endpoint(update_given_anime));
+
+    dialogue::enter::<Update, InMemStorage<UpdateAnimeState>, UpdateAnimeState, _>()
+        .branch(message_handler)
+        .branch(callback_query_handler)
+}
+
+fn is_allowed_user(msg_id: ChatId) -> bool {
     let chat_id = env::var("TCHAT_ID");
     match chat_id {
         Ok(id) => {
-            if msg.chat.id != ChatId(id.parse::<i64>().unwrap()) {
-                return Ok(());
+            if msg_id != ChatId(id.parse::<i64>().unwrap()) {
+                return false;
             }
         }
-        _ => return Ok(()),
+        _ => return false,
     }
-    match cmd {
-        Command::Help => {
-            bot.send_message(msg.chat.id, Command::descriptions().to_string())
-                .await?;
-        }
-        Command::CheckAnime => {
-            command_check_anime(msg.chat.id, bot)
-                .await
-                .expect("Error checking anime updates");
-        }
-    };
+    true
+}
+
+/// handles /help
+async fn command_help(bot: Bot, msg: Message) -> Result<()> {
+    if !is_allowed_user(msg.chat.id) {
+        return Ok(());
+    }
+    bot.send_message(msg.chat.id, Command::descriptions().to_string())
+        .await?;
     Ok(())
 }
 
-async fn command_check_anime(chat_id: ChatId, bot: Bot) -> Result<()> {
-    check_updates(chat_id, &bot).await
+/// handles /checkanime
+async fn command_check_anime(bot: Bot, msg: Message) -> Result<()> {
+    if !is_allowed_user(msg.chat.id) {
+        return Ok(());
+    }
+    check_updates(msg.chat.id, &bot).await
+}
+
+/// handles /updateanime
+async fn command_update_anime(
+    bot: Bot,
+    dialogue: Dialogue<UpdateAnimeState, InMemStorage<UpdateAnimeState>>,
+    msg: Message,
+) -> HandlerResult {
+    if !is_allowed_user(msg.chat.id) {
+        return Ok(());
+    }
+    let follows = get_follows_vec().await;
+    let mut buttons: Vec<Vec<InlineKeyboardButton>> = Vec::new();
+    for f in follows {
+        let md = format!("{:x}", md5::compute(f.0));
+        let name = if f.1.len() <= 128 {
+            f.1
+        } else {
+            f.1[..128].to_owned()
+        };
+        buttons.push([InlineKeyboardButton::callback(name, md)].to_vec());
+    }
+    let animes = InlineKeyboardMarkup::new(buttons);
+    bot.send_message(msg.chat.id, "Which anime do you want to update?")
+        .reply_markup(animes)
+        .await?;
+    dialogue.update(UpdateAnimeState::UpdateAnime).await?;
+    Ok(())
+}
+
+async fn update_given_anime(
+    bot: Bot,
+    dialogue: Dialogue<UpdateAnimeState, InMemStorage<UpdateAnimeState>>,
+    q: CallbackQuery,
+) -> HandlerResult {
+    if let Some(anime) = &q.data {
+        bot.send_message(dialogue.chat_id(), format!("Got {anime} from the button!"))
+            .await?;
+        dialogue.exit().await?;
+    }
+    Ok(())
+}
+
+async fn invalid_state(bot: Bot, msg: Message) -> HandlerResult {
+    bot.send_message(
+        msg.chat.id,
+        "Unable to handle the message. Type /help to see the usage.",
+    )
+    .await?;
+    Ok(())
 }
 
 async fn check_updates(chat_id: ChatId, bot: &Bot) -> Result<()> {
@@ -125,7 +210,7 @@ async fn check_updates(chat_id: ChatId, bot: &Bot) -> Result<()> {
         let mut message: String = "This is the latest anime update:\n".to_owned();
         for ep in notify.values() {
             message.push_str(&format!(
-                "— Episode {} for {} is out\n",
+                "— Episode {} for '{}' is out\n",
                 ep.info.last_episode, ep.info.name
             ));
         }
@@ -169,7 +254,7 @@ async fn fetch_rss() -> Result<HashMap<String, AniInfo>> {
             let episode = info.get(2).map_or("", |m| m.as_str());
             let series = info.get(1).map_or("", |m| m.as_str());
             updates.insert(
-                slugify(&series),
+                slugify(series),
                 AniInfo {
                     info: AniMinInfo {
                         name: String::from(series),
@@ -180,4 +265,20 @@ async fn fetch_rss() -> Result<HashMap<String, AniInfo>> {
         }
     }
     Ok(updates)
+}
+
+async fn get_follows_vec() -> Vec<(String, String)> {
+    let store_dir = env::var("BOT_STORAGE").expect("Error checking BOT_STORAGE");
+    let json_follows = store_dir.to_owned() + "/anime-following.json";
+    let follows_content = tokio::fs::read(json_follows)
+        .await
+        .expect("Error reading following file");
+    let following: Follows =
+        serde_json::from_slice(&follows_content).expect("Error deserializing following json");
+    let mut ret: Vec<(String, String)> = vec![];
+    for (key, val) in following.following {
+        ret.push((key, val.info.name));
+    }
+    ret.sort_unstable();
+    ret
 }
