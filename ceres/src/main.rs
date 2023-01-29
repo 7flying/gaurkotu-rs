@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use slug::slugify;
 use std::collections::HashMap;
 use std::env;
+use std::fmt::Display;
 use std::str;
 use teloxide::dispatching::dialogue::InMemStorage;
 use teloxide::dispatching::{dialogue, UpdateHandler};
@@ -23,6 +24,7 @@ const ANIME_RSS: &str = "https://raw.githubusercontent.com/ArjixGamer/gogoanime-
 #[derive(Debug, Serialize, Deserialize)]
 struct Follows {
     //#[serde(borrow = "'a")]
+    // key is the md5 of the slugified original Japanese name
     following: HashMap<String, AniInfo>,
 }
 
@@ -46,12 +48,35 @@ struct AniMinInfo {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct AniExtraInfo {
     en_name: String,
+    season: AnimeSeason,
 }
 
 impl Default for AniExtraInfo {
     fn default() -> Self {
         AniExtraInfo {
             en_name: String::new(),
+            season: AnimeSeason::Unknown,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+enum AnimeSeason {
+    Winter(u16),
+    Spring(u16),
+    Summer(u16),
+    Autumn(u16),
+    Unknown,
+}
+
+impl Display for AnimeSeason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AnimeSeason::Winter(y) => write!(f, "Winter {y}"),
+            AnimeSeason::Spring(y) => write!(f, "Spring {y}"),
+            AnimeSeason::Summer(y) => write!(f, "Summer {y}"),
+            AnimeSeason::Autumn(y) => write!(f, "Autumn {y}"),
+            AnimeSeason::Unknown => write!(f, "Unknown"),
         }
     }
 }
@@ -68,6 +93,8 @@ enum Command {
     CheckAnime,
     #[command(description = "updates the viewing progress of a series.")]
     UpdateAnime,
+    #[command(description = "shows the animes that we are following.")]
+    ShowFollowingAnime,
     #[command(description = "generate an id for a given name.")]
     GenId(String),
 }
@@ -96,6 +123,7 @@ fn schema() -> UpdateHandler<Box<dyn std::error::Error + Send + Sync + 'static>>
         .branch(case![Command::Help].endpoint(command_help))
         .branch(case![Command::CheckAnime].endpoint(command_check_anime))
         .branch(case![Command::UpdateAnime].endpoint(command_update_anime))
+        .branch(case![Command::ShowFollowingAnime].endpoint(command_show_following_anime))
         .branch(case![Command::GenId(anime)].endpoint(command_gen_id));
     let message_handler = Update::filter_message()
         .branch(command_handler)
@@ -166,6 +194,25 @@ async fn command_update_anime(
     Ok(())
 }
 
+/// handles /showfollowinganime
+async fn command_show_following_anime(bot: Bot, msg: Message) -> Result<()> {
+    if !is_allowed_user(msg.chat.id) {
+        return Ok(());
+    }
+    let follows_data = read_from_storage("anime-following.json").await;
+    let following: Follows =
+        serde_json::from_slice(&follows_data).expect("Error deserializing follows json");
+    let mut ret = String::new();
+    for aniinfo in following.following.values() {
+        ret.push_str(&format!(
+            "— {}, {} - Episode {}\n",
+            aniinfo.extra.en_name, aniinfo.extra.season, aniinfo.info.last_episode
+        ));
+    }
+    bot.send_message(msg.chat.id, ret).await?;
+    Ok(())
+}
+
 /// handles /genid {anime}
 async fn command_gen_id(bot: Bot, msg: Message, anime: String) -> Result<()> {
     if !is_allowed_user(msg.chat.id) {
@@ -205,7 +252,7 @@ async fn update_given_anime(
             bot.send_message(
                 dialogue.chat_id(),
                 format!(
-                    "Updated {} to episode {}",
+                    "Updated '{}' to episode {}",
                     info.extra.en_name, info.info.last_episode
                 ),
             )
@@ -233,17 +280,10 @@ async fn invalid_state(bot: Bot, msg: Message) -> HandlerResult {
 }
 
 async fn check_updates(chat_id: ChatId, bot: &Bot) -> Result<()> {
-    let store_dir = env::var("BOT_STORAGE").expect("Error checking BOT_STORAGE");
-    let json_updates = store_dir.to_owned() + "/anime-updates.json";
-    let updates_content = tokio::fs::read(json_updates)
-        .await
-        .expect("Error reading updates file");
+    let updates_content = read_from_storage("anime-updates.json").await;
     let updates: Updates =
         serde_json::from_slice(&updates_content).expect("Error deserializing update json");
-    let json_follows = store_dir.to_owned() + "/anime-following.json";
-    let follows_content = tokio::fs::read(json_follows)
-        .await
-        .expect("Error reading following file");
+    let follows_content = read_from_storage("anime-following.json").await;
     let following: Follows =
         serde_json::from_slice(&follows_content).expect("Error deserializing following json");
 
@@ -286,20 +326,17 @@ async fn check_updates(chat_id: ChatId, bot: &Bot) -> Result<()> {
             ));
         }
         bot.send_message(chat_id, message).await.unwrap();
-        sync_updates(updates, store_update, store_dir).await?;
+        sync_updates(updates, store_update).await?;
     }
 
     Ok(())
 }
 
-async fn sync_updates(
-    mut updates: Updates,
-    notify: HashMap<String, AniMinInfo>,
-    store_dir: String,
-) -> Result<()> {
+async fn sync_updates(mut updates: Updates, notify: HashMap<String, AniMinInfo>) -> Result<()> {
     for (id, info) in notify {
         updates.updates.insert(id, info);
     }
+    let store_dir = env::var("BOT_STORAGE").expect("Error checking BOT_STORAGE");
     let json = serde_json::to_string_pretty(&updates)?;
     let mut file = File::create(store_dir.to_owned() + "/anime-updates.json").await?;
     file.write_all(json.as_bytes()).await?;
@@ -337,11 +374,7 @@ async fn fetch_rss() -> Result<HashMap<String, AniMinInfo>> {
 }
 
 async fn get_follows_vec() -> Vec<(String, String)> {
-    let store_dir = env::var("BOT_STORAGE").expect("Error checking BOT_STORAGE");
-    let json_follows = store_dir.to_owned() + "/anime-following.json";
-    let follows_content = tokio::fs::read(json_follows)
-        .await
-        .expect("Error reading following file");
+    let follows_content = read_from_storage("anime-following.json").await;
     let following: Follows =
         serde_json::from_slice(&follows_content).expect("Error deserializing following json");
     let mut ret: Vec<(String, String)> = vec![];
@@ -350,4 +383,12 @@ async fn get_follows_vec() -> Vec<(String, String)> {
     }
     ret.sort_unstable();
     ret
+}
+
+async fn read_from_storage(file_name: &str) -> Vec<u8> {
+    let store_dir = env::var("BOT_STORAGE").expect("Error checking BOT_STORAGE");
+    let path = store_dir.to_owned() + "/" + file_name;
+    tokio::fs::read(path)
+        .await
+        .expect("Error reading {file_name}")
 }
