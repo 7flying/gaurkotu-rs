@@ -2,11 +2,9 @@ use feed_rs::parser;
 use hyper::{body::HttpBody, Client};
 use hyper_tls::HttpsConnector;
 use regex::Regex;
-use serde::{Deserialize, Serialize};
 use slug::slugify;
 use std::collections::HashMap;
 use std::env;
-use std::fmt::Display;
 use std::str;
 use teloxide::dispatching::dialogue::InMemStorage;
 use teloxide::dispatching::{dialogue, UpdateHandler};
@@ -16,70 +14,11 @@ use teloxide::{prelude::*, utils::command::BotCommands};
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
 
+mod anime;
+use anime::{AniInfo, AniMinInfo, Follows, Updates, ANIME_RSS};
+
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 type HandlerResult = std::result::Result<(), Box<dyn std::error::Error + Send + Sync>>;
-
-const ANIME_RSS: &str = "https://raw.githubusercontent.com/ArjixGamer/gogoanime-rss/main/gogoanime/gogoanime-rss-sub.xml";
-
-#[derive(Debug, Serialize, Deserialize)]
-struct Follows {
-    //#[serde(borrow = "'a")]
-    // key is the md5 of the slugified original Japanese name
-    following: HashMap<String, AniInfo>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct Updates {
-    updates: HashMap<String, AniMinInfo>,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-struct AniInfo {
-    info: AniMinInfo,
-    extra: AniExtraInfo,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-struct AniMinInfo {
-    name: String,
-    last_episode: i16,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-struct AniExtraInfo {
-    en_name: String,
-    season: AnimeSeason,
-}
-
-impl Default for AniExtraInfo {
-    fn default() -> Self {
-        AniExtraInfo {
-            en_name: String::new(),
-            season: AnimeSeason::Unknown,
-        }
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-enum AnimeSeason {
-    Winter(u16),
-    Spring(u16),
-    Summer(u16),
-    Autumn(u16),
-    Unknown,
-}
-
-impl Display for AnimeSeason {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            AnimeSeason::Winter(y) => write!(f, "Winter {y}"),
-            AnimeSeason::Spring(y) => write!(f, "Spring {y}"),
-            AnimeSeason::Summer(y) => write!(f, "Summer {y}"),
-            AnimeSeason::Autumn(y) => write!(f, "Autumn {y}"),
-            AnimeSeason::Unknown => write!(f, "Unknown"),
-        }
-    }
-}
 
 #[derive(BotCommands, Clone)]
 #[command(
@@ -202,8 +141,10 @@ async fn command_show_following_anime(bot: Bot, msg: Message) -> Result<()> {
     let follows_data = read_from_storage("anime-following.json").await;
     let following: Follows =
         serde_json::from_slice(&follows_data).expect("Error deserializing follows json");
+    let mut stuff: Vec<AniInfo> = following.following.values().cloned().collect();
+    stuff.sort_unstable();
     let mut ret = String::new();
-    for aniinfo in following.following.values() {
+    for aniinfo in stuff {
         ret.push_str(&format!(
             "— {}, {} - Episode {}\n",
             aniinfo.extra.en_name, aniinfo.extra.season, aniinfo.info.last_episode
