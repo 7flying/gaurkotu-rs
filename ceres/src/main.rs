@@ -26,7 +26,7 @@ type HandlerResult = std::result::Result<(), Box<dyn std::error::Error + Send + 
     description = "These commands are supported:"
 )]
 enum Command {
-    #[command(description = "display this text.")]
+    #[command(description = "shows this text.")]
     Help,
     #[command(description = "check if there are any anime updates.")]
     CheckAnime,
@@ -34,6 +34,8 @@ enum Command {
     UpdateAnime,
     #[command(description = "shows the animes that we are following.")]
     ShowFollowingAnime,
+    #[command(description = "gives a to-watch list to catch up on.")]
+    ToWatch,
     #[command(description = "generate an id for a given name.")]
     GenId(String),
 }
@@ -63,6 +65,7 @@ fn schema() -> UpdateHandler<Box<dyn std::error::Error + Send + Sync + 'static>>
         .branch(case![Command::CheckAnime].endpoint(command_check_anime))
         .branch(case![Command::UpdateAnime].endpoint(command_update_anime))
         .branch(case![Command::ShowFollowingAnime].endpoint(command_show_following_anime))
+        .branch(case![Command::ToWatch].endpoint(command_to_watch))
         .branch(case![Command::GenId(anime)].endpoint(command_gen_id));
     let message_handler = Update::filter_message()
         .branch(command_handler)
@@ -123,7 +126,7 @@ async fn command_update_anime(
         } else {
             f.1[..128].to_owned()
         };
-        buttons.push([InlineKeyboardButton::callback(name, format!("{}", &f.0))].to_vec());
+        buttons.push([InlineKeyboardButton::callback(name, f.0.to_string())].to_vec());
     }
     let animes = InlineKeyboardMarkup::new(buttons);
     bot.send_message(msg.chat.id, "Which anime do you want to update?")
@@ -151,6 +154,49 @@ async fn command_show_following_anime(bot: Bot, msg: Message) -> Result<()> {
         ));
     }
     bot.send_message(msg.chat.id, ret).await?;
+    Ok(())
+}
+
+/// handles /towatch
+async fn command_to_watch(bot: Bot, msg: Message) -> Result<()> {
+    if !is_allowed_user(msg.chat.id) {
+        return Ok(());
+    }
+    let follows_data = read_from_storage("anime-following.json").await;
+    let following: Follows =
+        serde_json::from_slice(&follows_data).expect("Error deserializing following json");
+    let updates_data = read_from_storage("anime-updates.json").await;
+    let updates: Updates =
+        serde_json::from_slice(&updates_data).expect("Error deserializing updates json");
+    let mut towatch: Vec<(String, String)> = Vec::new();
+    for (id, ani) in following.following {
+        if updates.updates.contains_key(&id)
+            && ani.info.last_episode < updates.updates.get(&id).unwrap().last_episode
+        {
+            towatch.push((
+                ani.extra.en_name,
+                format!(
+                    "up to Episode {}",
+                    updates.updates.get(&id).unwrap().last_episode
+                ),
+            ));
+        }
+    }
+    if !towatch.is_empty() {
+        towatch.sort_unstable();
+        let mut ret = "This is our watchlist:\n".to_string();
+        for (ani, desc) in towatch {
+            ret.push_str(&format!("— {ani}, {desc}\n"));
+        }
+        bot.send_message(msg.chat.id, ret).await?;
+    } else {
+        bot.send_message(
+            msg.chat.id,
+            "We are up to date according to the latest Update data.",
+        )
+        .await?;
+    }
+
     Ok(())
 }
 
