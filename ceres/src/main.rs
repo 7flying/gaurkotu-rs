@@ -118,7 +118,8 @@ async fn command_update_anime(
     if !is_allowed_user(msg.chat.id) {
         return Ok(());
     }
-    let follows = get_follows_vec().await;
+    let mut follows = get_follows_vec().await;
+    follows.sort_by_key(|k| k.1.to_owned());
     let mut buttons: Vec<Vec<InlineKeyboardButton>> = Vec::new();
     for f in follows {
         let name = if f.1.len() <= 128 {
@@ -368,7 +369,6 @@ async fn get_follows_vec() -> Vec<(String, String)> {
     for (key, val) in following.following {
         ret.push((key, val.extra.en_name));
     }
-    ret.sort_unstable();
     ret
 }
 
