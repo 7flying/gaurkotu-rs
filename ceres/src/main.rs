@@ -174,20 +174,31 @@ async fn command_to_watch(bot: Bot, msg: Message) -> Result<()> {
         if updates.updates.contains_key(&id)
             && ani.info.last_episode < updates.updates.get(&id).unwrap().last_episode
         {
-            towatch.push((
-                ani.extra.en_name,
-                format!(
-                    "up to Episode {}",
-                    updates.updates.get(&id).unwrap().last_episode
-                ),
-            ));
+            if ani.info.last_episode + 1 == updates.updates.get(&id).unwrap().last_episode {
+                towatch.push((
+                    ani.extra.en_name,
+                    format!(
+                        "just Episode {}",
+                        updates.updates.get(&id).unwrap().last_episode
+                    ),
+                ));
+            } else {
+                towatch.push((
+                    ani.extra.en_name,
+                    format!(
+                        "from {} up to Episode {}",
+                        ani.info.last_episode + 1,
+                        updates.updates.get(&id).unwrap().last_episode
+                    ),
+                ));
+            }
         }
     }
     if !towatch.is_empty() {
         towatch.sort_unstable();
         let mut ret = "This is our watchlist:\n".to_string();
         for (ani, desc) in towatch {
-            ret.push_str(&format!("— {ani}, {desc}\n"));
+            ret.push_str(&format!("· {ani}\n    → {desc}\n"));
         }
         bot.send_message(msg.chat.id, ret).await?;
     } else {
