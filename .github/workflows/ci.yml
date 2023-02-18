@@ -15,6 +15,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
+          components: clippy
       - run: cargo fmt --all -- --check
   clippy:
     name: clippy
@@ -26,4 +27,12 @@ jobs:
           toolchain: stable
           components: clippy
       - run: cargo clippy -- -D warnings -D clippy::panic
-
+  unit_tests:
+    name: unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+      - run: cargo test
