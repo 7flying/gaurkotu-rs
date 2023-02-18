@@ -347,8 +347,7 @@ async fn fetch_rss() -> Result<HashMap<String, AniMinInfo>> {
     let client = Client::builder().build::<_, hyper::Body>(https);
     let uri = ANIME_RSS.parse()?;
     let mut resp = client.get(uri).await.expect("Error fetching RSS");
-    let mut stuff = "".to_owned();
-    // TODO: do not convert to str since we are using bytes below
+    let mut stuff = String::new();
     while let Some(next) = resp.data().await {
         let chunk = next?;
         stuff.push_str(str::from_utf8(&chunk)?);
@@ -389,4 +388,78 @@ async fn read_from_storage(file_name: &str) -> Vec<u8> {
     tokio::fs::read(path)
         .await
         .expect("Error reading {file_name}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn xml_required_fields() -> Result<()> {
+        let https = HttpsConnector::new();
+        let client = Client::builder().build::<_, hyper::Body>(https);
+        let uri = ANIME_RSS.parse().unwrap();
+        let mut resp = client.get(uri).await.expect("Error fetching RSS");
+        let mut stuff = String::new();
+        while let Some(next) = resp.data().await {
+            let chunk = next.unwrap();
+            stuff.push_str(str::from_utf8(&chunk).unwrap());
+        }
+        let feed = parser::parse(stuff.as_bytes()).unwrap();
+        let re = Regex::new(r"([\w\W\s]+) - Episode ([\d\D]+)").unwrap();
+        if feed.entries.len() == 0 {
+            assert!(false);
+        }
+        for et in feed.entries {
+            match re.captures(&et.title.unwrap().content) {
+                Some(info) => {
+                    let episode = info.get(2).map_or("", |m| m.as_str());
+                    let series = info.get(1).map_or("", |m| m.as_str());
+                    if episode.len() == 0 || series.len() == 0 {
+                        assert!(false);
+                    }
+                }
+                None => assert!(false),
+            }
+            break;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn serde_serialization() -> Result<()> {
+        let json_following = r#"{
+  "following": {
+    "098f6bcd4621d373cade4e832627b4f6": {
+      "info": {
+        "name": "Some name",
+        "last_episode": 1
+      },
+      "extra": {
+        "en_name": "Some en name",
+        "season": {
+          "Autumn": 2022
+        }
+      }
+    }
+  }
+}"#;
+        let json_updates = r#"{
+  "updates": {
+    "098f6bcd4621d373cade4e832627b4f6": {
+      "name": "Some en name",
+      "last_episode": 7
+    }
+  }
+}"#;
+        // deserialization
+        let following: Follows = serde_json::from_str(json_following).unwrap();
+        let updates: Updates = serde_json::from_str(json_updates).unwrap();
+        // serialization
+        let gen_following = serde_json::to_string_pretty(&following).unwrap();
+        let gen_updates = serde_json::to_string_pretty(&updates).unwrap();
+        assert_eq!(gen_following, json_following);
+        assert_eq!(gen_updates, json_updates);
+        Ok(())
+    }
 }
