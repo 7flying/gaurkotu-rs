@@ -28,15 +28,17 @@ type HandlerResult = std::result::Result<(), Box<dyn std::error::Error + Send + 
 enum Command {
     #[command(description = "shows this text.")]
     Help,
-    #[command(description = "check if there are any anime updates.")]
+    #[command(description = "checks if there are any anime updates.")]
     CheckAnime,
     #[command(description = "updates the viewing progress of a series.")]
     UpdateAnime,
     #[command(description = "shows the animes that we are following.")]
     ShowFollowingAnime,
+    #[command(description = "shows the animes that we have finished.")]
+    ShowFinishedAnime,
     #[command(description = "gives a to-watch list to catch up on.")]
     ToWatch,
-    #[command(description = "generate an id for a given name.")]
+    #[command(description = "generates an id for a given name.")]
     GenId(String),
 }
 
@@ -65,6 +67,7 @@ fn schema() -> UpdateHandler<Box<dyn std::error::Error + Send + Sync + 'static>>
         .branch(case![Command::CheckAnime].endpoint(command_check_anime))
         .branch(case![Command::UpdateAnime].endpoint(command_update_anime))
         .branch(case![Command::ShowFollowingAnime].endpoint(command_show_following_anime))
+        .branch(case![Command::ShowFinishedAnime].endpoint(command_show_finished_anime))
         .branch(case![Command::ToWatch].endpoint(command_to_watch))
         .branch(case![Command::GenId(anime)].endpoint(command_gen_id));
     let message_handler = Update::filter_message()
@@ -146,11 +149,42 @@ async fn command_show_following_anime(bot: Bot, msg: Message) -> Result<()> {
     let following: Follows =
         serde_json::from_slice(&follows_data).expect("Error deserializing follows json");
     let mut stuff: Vec<AniInfo> = following.following.values().cloned().collect();
+    if stuff.is_empty() {
+        bot.send_message(msg.chat.id, "We are not following any anime series.")
+            .await?;
+        return Ok(());
+    }
     stuff.sort_unstable();
-    let mut ret = String::new();
+    let mut ret = "We are following these anime series:\n".to_string();
     for aniinfo in stuff {
         ret.push_str(&format!(
-            "— {}, {} - Episode {}\n",
+            "— {} [{}] - Episode {}\n",
+            aniinfo.extra.en_name, aniinfo.extra.season, aniinfo.info.last_episode
+        ));
+    }
+    bot.send_message(msg.chat.id, ret).await?;
+    Ok(())
+}
+
+/// handles /showfinishedanime
+async fn command_show_finished_anime(bot: Bot, msg: Message) -> Result<()> {
+    if !is_allowed_user(msg.chat.id) {
+        return Ok(());
+    }
+    let follows_data = read_from_storage("anime-finished.json").await;
+    let following: Follows =
+        serde_json::from_slice(&follows_data).expect("Error deserializing finished json");
+    let mut stuff: Vec<AniInfo> = following.following.values().cloned().collect();
+    if stuff.is_empty() {
+        bot.send_message(msg.chat.id, "We haven't finished any anime series.")
+            .await?;
+        return Ok(());
+    }
+    stuff.sort_unstable();
+    let mut ret = "We have finished these anime series:\n".to_string();
+    for aniinfo in stuff {
+        ret.push_str(&format!(
+            "— {} [{}] - Episode {}\n",
             aniinfo.extra.en_name, aniinfo.extra.season, aniinfo.info.last_episode
         ));
     }
