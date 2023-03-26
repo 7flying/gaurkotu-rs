@@ -433,7 +433,7 @@ async fn check_updates(chat_id: ChatId, bot: &Bot) -> Result<()> {
             message_update.insert(&following.following.get(id).unwrap().extra.en_name, ani);
         }
     }
-    if message_update.values().len() == 0 && new_series.len() == 0 {
+    if message_update.values().len() == 0 && new_series.is_empty() {
         bot.send_message(chat_id, "There are no updates!")
             .await
             .unwrap();
@@ -445,7 +445,7 @@ async fn check_updates(chat_id: ChatId, bot: &Bot) -> Result<()> {
                 info.last_episode, ename, info.name
             ));
         }
-        if new_series.len() > 0 {
+        if !new_series.is_empty() {
             message.push_str("We have new series coming up!\n");
             for series in new_series {
                 message.push_str(&format!("— {series}\n"));
