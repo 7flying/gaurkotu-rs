@@ -53,6 +53,7 @@ enum AnimeState {
 
 static FOLLOWING_FILE: &str = "anime-following.json";
 static FINISHED_FILE: &str = "anime-finished.json";
+static UPDATES_FILE: &str = "anime-updates.json";
 
 #[tokio::main]
 async fn main() {
@@ -413,10 +414,14 @@ async fn check_updates(chat_id: ChatId, bot: &Bot) -> Result<()> {
 
     let eps = fetch_rss().await?;
     // we care about the ones that we are following, and out of those, the new updates
-    let mut store_update: HashMap<String, AniMinInfo> = HashMap::new();
-    let mut message_update: HashMap<String, AniMinInfo> = HashMap::new();
+    let mut store_update: HashMap<&String, &AniMinInfo> = HashMap::new();
+    let mut message_update: HashMap<&String, &AniMinInfo> = HashMap::new();
+    let mut new_series: Vec<&String> = Vec::new();
     for (id, ani) in eps.iter() {
         if !following.following.contains_key(id) {
+            if ani.last_episode == 1 {
+                new_series.push(&ani.name);
+            }
             continue;
         }
         if (!updates.updates.contains_key(id)
@@ -424,20 +429,11 @@ async fn check_updates(chat_id: ChatId, bot: &Bot) -> Result<()> {
             || (updates.updates.contains_key(id)
                 && ani.last_episode > updates.updates.get(id).unwrap().last_episode)
         {
-            store_update.insert(id.to_owned(), ani.to_owned());
-            message_update.insert(
-                following
-                    .following
-                    .get(id)
-                    .unwrap()
-                    .extra
-                    .en_name
-                    .to_owned(),
-                ani.to_owned(),
-            );
+            store_update.insert(id, ani);
+            message_update.insert(&following.following.get(id).unwrap().extra.en_name, ani);
         }
     }
-    if message_update.values().len() == 0 {
+    if message_update.values().len() == 0 && new_series.len() == 0 {
         bot.send_message(chat_id, "There are no updates!")
             .await
             .unwrap();
@@ -449,20 +445,25 @@ async fn check_updates(chat_id: ChatId, bot: &Bot) -> Result<()> {
                 info.last_episode, ename, info.name
             ));
         }
-        bot.send_message(chat_id, message).await.unwrap();
+        if new_series.len() > 0 {
+            message.push_str("We have new series coming up!\n");
+            for series in new_series {
+                message.push_str(&format!("— {series}\n"));
+            }
+        }
+        bot.send_message(chat_id, message).await?;
         sync_updates(updates, store_update).await?;
     }
-
     Ok(())
 }
 
-async fn sync_updates(mut updates: Updates, notify: HashMap<String, AniMinInfo>) -> Result<()> {
+async fn sync_updates(mut updates: Updates, notify: HashMap<&String, &AniMinInfo>) -> Result<()> {
     for (id, info) in notify {
-        updates.updates.insert(id, info);
+        updates.updates.insert(id.to_owned(), info.to_owned());
     }
     let store_dir = env::var("BOT_STORAGE").expect("Error checking BOT_STORAGE");
     let json = serde_json::to_string_pretty(&updates)?;
-    let mut file = File::create(store_dir.to_owned() + "/anime-updates.json").await?;
+    let mut file = File::create(store_dir.to_owned() + "/" + UPDATES_FILE).await?;
     file.write_all(json.as_bytes()).await?;
     Ok(())
 }
