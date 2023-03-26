@@ -38,22 +38,28 @@ enum Command {
     ShowFinishedAnime,
     #[command(description = "gives a to-watch list to catch up on.")]
     ToWatch,
+    #[command(description = "marks a given anime as finished.")]
+    FinishAnime,
     #[command(description = "generates an id for a given name.")]
     GenId(String),
 }
 
 #[derive(Clone, Default)]
-enum UpdateAnimeState {
+enum AnimeState {
     #[default]
     UpdateAnime,
+    FinishAnime,
 }
+
+static FOLLOWING_FILE: &str = "anime-following.json";
+static FINISHED_FILE: &str = "anime-finished.json";
 
 #[tokio::main]
 async fn main() {
     log::info!("Starting command bot...");
     let bot = Bot::from_env();
     Dispatcher::builder(bot, schema())
-        .dependencies(dptree::deps![InMemStorage::<UpdateAnimeState>::new()])
+        .dependencies(dptree::deps![InMemStorage::<AnimeState>::new()])
         .enable_ctrlc_handler()
         .build()
         .dispatch()
@@ -69,14 +75,16 @@ fn schema() -> UpdateHandler<Box<dyn std::error::Error + Send + Sync + 'static>>
         .branch(case![Command::ShowFollowingAnime].endpoint(command_show_following_anime))
         .branch(case![Command::ShowFinishedAnime].endpoint(command_show_finished_anime))
         .branch(case![Command::ToWatch].endpoint(command_to_watch))
+        .branch(case![Command::FinishAnime].endpoint(command_finish_anime))
         .branch(case![Command::GenId(anime)].endpoint(command_gen_id));
     let message_handler = Update::filter_message()
         .branch(command_handler)
         .branch(dptree::endpoint(invalid_state));
     let callback_query_handler = Update::filter_callback_query()
-        .branch(case![UpdateAnimeState::UpdateAnime].endpoint(update_given_anime));
+        .branch(case![AnimeState::UpdateAnime].endpoint(update_given_anime))
+        .branch(case![AnimeState::FinishAnime].endpoint(finish_given_anime));
 
-    dialogue::enter::<Update, InMemStorage<UpdateAnimeState>, UpdateAnimeState, _>()
+    dialogue::enter::<Update, InMemStorage<AnimeState>, AnimeState, _>()
         .branch(message_handler)
         .branch(callback_query_handler)
 }
@@ -112,15 +120,7 @@ async fn command_check_anime(bot: Bot, msg: Message) -> Result<()> {
     check_updates(msg.chat.id, &bot).await
 }
 
-/// handles /updateanime
-async fn command_update_anime(
-    bot: Bot,
-    dialogue: Dialogue<UpdateAnimeState, InMemStorage<UpdateAnimeState>>,
-    msg: Message,
-) -> HandlerResult {
-    if !is_allowed_user(msg.chat.id) {
-        return Ok(());
-    }
+async fn gen_following_keyboard() -> InlineKeyboardMarkup {
     let mut follows = get_follows_vec().await;
     follows.sort_by_key(|k| k.1.to_owned());
     let mut buttons: Vec<Vec<InlineKeyboardButton>> = Vec::new();
@@ -132,11 +132,69 @@ async fn command_update_anime(
         };
         buttons.push([InlineKeyboardButton::callback(name, f.0.to_string())].to_vec());
     }
-    let animes = InlineKeyboardMarkup::new(buttons);
+    InlineKeyboardMarkup::new(buttons)
+}
+
+/// handles /updateanime
+async fn command_update_anime(
+    bot: Bot,
+    dialogue: Dialogue<AnimeState, InMemStorage<AnimeState>>,
+    msg: Message,
+) -> HandlerResult {
+    if !is_allowed_user(msg.chat.id) {
+        return Ok(());
+    }
+    let animes = gen_following_keyboard().await;
     bot.send_message(msg.chat.id, "Which anime do you want to update?")
         .reply_markup(animes)
         .await?;
-    dialogue.update(UpdateAnimeState::UpdateAnime).await?;
+    dialogue.update(AnimeState::UpdateAnime).await?;
+    Ok(())
+}
+
+// Works along with /updateanime to update the progress on a given anime series
+async fn update_given_anime(
+    bot: Bot,
+    dialogue: Dialogue<AnimeState, InMemStorage<AnimeState>>,
+    q: CallbackQuery,
+) -> HandlerResult {
+    if let Some(anime) = &q.data {
+        let store_dir = env::var("BOT_STORAGE").expect("Error checking BOT_STORAGE");
+        let json_follows = store_dir.to_owned() + "/" + FOLLOWING_FILE;
+        let follows_content = tokio::fs::read(json_follows)
+            .await
+            .expect("Error reading following file");
+        let mut following: Follows =
+            serde_json::from_slice(&follows_content).expect("Error deserializing following json");
+        if !following.following.contains_key(anime) {
+            bot.send_message(
+                dialogue.chat_id(),
+                format!("I couldn't find {anime} in our follows"),
+            )
+            .await?;
+            dialogue.exit().await?;
+            return Ok(());
+        }
+
+        let mut info = following.following.get(anime).unwrap().to_owned();
+        info.info.last_episode += 1;
+        following
+            .following
+            .insert(anime.to_owned(), info.to_owned());
+
+        let mut file = File::create(store_dir.to_owned() + "/" + FOLLOWING_FILE).await?;
+        file.write_all(serde_json::to_string_pretty(&following)?.as_bytes())
+            .await?;
+        bot.send_message(
+            dialogue.chat_id(),
+            format!(
+                "Updated '{}' to episode {}",
+                info.extra.en_name, info.info.last_episode
+            ),
+        )
+        .await?;
+        dialogue.exit().await?;
+    }
     Ok(())
 }
 
@@ -155,10 +213,10 @@ async fn command_show_following_anime(bot: Bot, msg: Message) -> Result<()> {
         return Ok(());
     }
     stuff.sort_unstable();
-    let mut ret = "We are following these anime series:\n".to_string();
+    let mut ret = "We are following these anime series:\n\n".to_string();
     for aniinfo in stuff {
         ret.push_str(&format!(
-            "— {} [{}] - Episode {}\n",
+            "— {} [{}] - Ep. {}\n",
             aniinfo.extra.en_name, aniinfo.extra.season, aniinfo.info.last_episode
         ));
     }
@@ -181,14 +239,91 @@ async fn command_show_finished_anime(bot: Bot, msg: Message) -> Result<()> {
         return Ok(());
     }
     stuff.sort_unstable();
-    let mut ret = "We have finished these anime series:\n".to_string();
+    let mut ret = "We have finished these anime series:\n\n".to_string();
     for aniinfo in stuff {
         ret.push_str(&format!(
-            "— {} [{}] - Episode {}\n",
+            "— {} [{}] - Ep. {}\n",
             aniinfo.extra.en_name, aniinfo.extra.season, aniinfo.info.last_episode
         ));
     }
     bot.send_message(msg.chat.id, ret).await?;
+    Ok(())
+}
+
+/// handles /finishanime
+async fn command_finish_anime(
+    bot: Bot,
+    dialogue: Dialogue<AnimeState, InMemStorage<AnimeState>>,
+    msg: Message,
+) -> HandlerResult {
+    if !is_allowed_user(msg.chat.id) {
+        return Ok(());
+    }
+    let animes = gen_following_keyboard().await;
+    bot.send_message(msg.chat.id, "Which anime have you finished?")
+        .reply_markup(animes)
+        .await?;
+    dialogue.update(AnimeState::FinishAnime).await?;
+    Ok(())
+}
+
+// works along with /finishanime to mark a given anime as finished
+async fn finish_given_anime(
+    bot: Bot,
+    dialogue: Dialogue<AnimeState, InMemStorage<AnimeState>>,
+    q: CallbackQuery,
+) -> HandlerResult {
+    if let Some(anime) = &q.data {
+        let store_dir = env::var("BOT_STORAGE").expect("Error checking BOT_STORAGE");
+        // get following
+        let json_follows = store_dir.to_owned() + "/" + FOLLOWING_FILE;
+        let follows_content = tokio::fs::read(json_follows)
+            .await
+            .expect("Error reading following file");
+        let mut following: Follows =
+            serde_json::from_slice(&follows_content).expect("Error deserializing following json");
+        // get finished
+        let json_finished = store_dir.to_owned() + "/" + FINISHED_FILE;
+        let finished_content = tokio::fs::read(json_finished)
+            .await
+            .expect("Error reading finished file");
+        let mut finished: Follows =
+            serde_json::from_slice(&finished_content).expect("Error deserializing finished json");
+        if finished.following.contains_key(anime) {
+            bot.send_message(
+                dialogue.chat_id(),
+                format!("You already have '{anime}' in our finished list"),
+            )
+            .await?;
+            dialogue.exit().await?;
+            return Ok(());
+        }
+        // add it to finished
+        let info = following.following.get(anime).unwrap().clone();
+        finished.following.insert(anime.to_owned(), info.to_owned());
+        let mut file_finished = File::create(store_dir.to_owned() + "/" + FINISHED_FILE).await?;
+        file_finished
+            .write_all(serde_json::to_string_pretty(&finished)?.as_bytes())
+            .await?;
+        // remove from following and update
+        following.following.remove(anime);
+        let mut file_following = File::create(store_dir.to_owned() + "/" + FOLLOWING_FILE).await?;
+        file_following
+            .write_all(serde_json::to_string_pretty(&following)?.as_bytes())
+            .await?;
+        bot.send_message(
+            dialogue.chat_id(),
+            format!(
+                "'{}' has been added to the finished list.",
+                info.extra.en_name
+            ),
+        )
+        .await?;
+    } else {
+        bot.send_message(dialogue.chat_id(), "Did not get an anime")
+            .await?;
+    }
+    dialogue.exit().await?;
     Ok(())
 }
 
@@ -212,7 +347,7 @@ async fn command_to_watch(bot: Bot, msg: Message) -> Result<()> {
                 towatch.push((
                     ani.extra.en_name,
                     format!(
-                        "just Episode {}",
+                        "just Ep. {}",
                         updates.updates.get(&id).unwrap().last_episode
                     ),
                 ));
@@ -220,7 +355,7 @@ async fn command_to_watch(bot: Bot, msg: Message) -> Result<()> {
                 towatch.push((
                     ani.extra.en_name,
                     format!(
-                        "from {} up to Episode {}",
+                        "from {} up to Ep.{}",
                         ani.info.last_episode + 1,
                         updates.updates.get(&id).unwrap().last_episode
                     ),
@@ -256,50 +391,6 @@ async fn command_gen_id(bot: Bot, msg: Message, anime: String) -> Result<()> {
         format!("id:{:x}", md5::compute(slugify(anime))),
     )
     .await?;
-    Ok(())
-}
-
-async fn update_given_anime(
-    bot: Bot,
-    dialogue: Dialogue<UpdateAnimeState, InMemStorage<UpdateAnimeState>>,
-    q: CallbackQuery,
-) -> HandlerResult {
-    if let Some(anime) = &q.data {
-        let store_dir = env::var("BOT_STORAGE").expect("Error checking BOT_STORAGE");
-        let json_follows = store_dir.to_owned() + "/anime-following.json";
-        let follows_content = tokio::fs::read(json_follows)
-            .await
-            .expect("Error reading following file");
-        let mut following: Follows =
-            serde_json::from_slice(&follows_content).expect("Error deserializing following json");
-        if following.following.contains_key(anime) {
-            let mut info = following.following.get(anime).unwrap().to_owned();
-            info.info.last_episode += 1;
-            following
-                .following
-                .insert(anime.to_owned(), info.to_owned());
-
-            let json = serde_json::to_string_pretty(&following)?;
-            let mut file = File::create(store_dir.to_owned() + "/anime-following.json").await?;
-            file.write_all(json.as_bytes()).await?;
-            bot.send_message(
-                dialogue.chat_id(),
-                format!(
-                    "Updated '{}' to episode {}",
-                    info.extra.en_name, info.info.last_episode
-                ),
-            )
-            .await?;
-        } else {
-            bot.send_message(
-                dialogue.chat_id(),
-                format!("I couldn't find {anime} in our follows"),
-            )
-            .await?;
-        }
-
-        dialogue.exit().await?;
-    }
     Ok(())
 }
 
@@ -351,10 +442,10 @@ async fn check_updates(chat_id: ChatId, bot: &Bot) -> Result<()> {
             .await
             .unwrap();
     } else {
-        let mut message: String = "This is the latest anime update:\n".to_owned();
+        let mut message: String = "This is the latest anime update:\n\n".to_owned();
         for (ename, info) in message_update {
             message.push_str(&format!(
-                "— Episode {} for '{}' is out ({})\n",
+                "— Ep. {} for '{}' is out ({})\n",
                 info.last_episode, ename, info.name
             ));
         }
