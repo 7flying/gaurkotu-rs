@@ -439,13 +439,18 @@ async fn check_updates(chat_id: ChatId, bot: &Bot) -> Result<()> {
             .unwrap();
     } else {
         let mut message: String = "This is the latest anime update:\n\n".to_owned();
+        let mut up = false;
         for (ename, info) in message_update {
             message.push_str(&format!(
                 "— Ep. {} for '{}' is out ({})\n",
                 info.last_episode, ename, info.name
             ));
+            up = true;
         }
         if !new_series.is_empty() {
+            if up {
+                message.push_str("\n");
+            }
             message.push_str("We have new series coming up!\n");
             for series in new_series {
                 message.push_str(&format!("— {series}\n"));
