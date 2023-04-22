@@ -449,7 +449,7 @@ async fn check_updates(chat_id: ChatId, bot: &Bot) -> Result<()> {
         }
         if !new_series.is_empty() {
             if up {
-                message.push_str("\n");
+                message.push('\n');
             }
             message.push_str("We have new series coming up!\n");
             for series in new_series {
