@@ -483,8 +483,12 @@ async fn fetch_rss() -> Result<HashMap<String, AniMinInfo>> {
         let chunk = next?;
         stuff.push_str(str::from_utf8(&chunk)?);
     }
-    let feed = parser::parse(stuff.as_bytes()).unwrap();
     let mut updates: HashMap<String, AniMinInfo> = HashMap::new();
+    let maybe_feed = parser::parse(stuff.as_bytes());
+    if maybe_feed.is_err() {
+        return Ok(updates);
+    }
+    let feed = maybe_feed.unwrap();
     let re = Regex::new(r"([\w\W\s]+) - Episode ([\d\D]+)").unwrap();
     for et in feed.entries {
         if let Some(info) = re.captures(&et.title.unwrap().content) {
