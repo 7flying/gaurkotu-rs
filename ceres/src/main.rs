@@ -414,7 +414,6 @@ async fn check_updates(chat_id: ChatId, bot: &Bot) -> Result<()> {
 
     let mut eps = fetch_rss().await?;
     if eps.is_empty() {
-        println!("switich to scraper");
         log::info!("switching to scraper");
         eps = scrap_updates().await?;
     }
@@ -582,12 +581,13 @@ async fn scrap_updates() -> Result<HashMap<String, AniMinInfo>> {
                     continue;
                 }
             };
-            let ani = AniMinInfo {
-                name: String::from(title),
-                last_episode,
-            };
-            println!("Result: {:x}, {:?}", md5::compute(href), ani);
-            updates.insert(format!("{:x}", md5::compute(href)), ani);
+            updates.insert(
+                format!("{:x}", md5::compute(href)),
+                AniMinInfo {
+                    name: String::from(title),
+                    last_episode,
+                },
+            );
         }
     }
     Ok(updates)
