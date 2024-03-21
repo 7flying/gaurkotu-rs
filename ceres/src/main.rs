@@ -523,10 +523,10 @@ async fn scrap_updates() -> Result<HashMap<String, AniMinInfo>> {
         let episode = match ep.text().collect::<Vec<_>>().first() {
             Some(e) => {
                 let mut ret = e.to_string();
-                if e.starts_with("\"") {
+                if e.starts_with('"') {
                     ret = ret.chars().skip(1).collect();
                 }
-                if ret.ends_with("\"") {
+                if ret.ends_with('"') {
                     ret = ret.chars().skip(ret.len()).collect();
                 }
                 ret
@@ -553,7 +553,7 @@ async fn scrap_updates() -> Result<HashMap<String, AniMinInfo>> {
         };
         let href = match a.value().attr("href") {
             Some(r) => {
-                if let Some(rr) = re_href.captures(&r) {
+                if let Some(rr) = re_href.captures(r) {
                     let stuff = rr.get(1).map_or("", |m| m.as_str());
                     stuff
                 } else {
