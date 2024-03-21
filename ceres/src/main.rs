@@ -2,6 +2,7 @@ use feed_rs::parser;
 use hyper::{body::HttpBody, Client};
 use hyper_tls::HttpsConnector;
 use regex::Regex;
+use scraper::{Html, Selector};
 use slug::slugify;
 use std::collections::HashMap;
 use std::env;
@@ -15,7 +16,7 @@ use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
 
 mod anime;
-use anime::{AniInfo, AniMinInfo, Follows, Updates, ANIME_RSS};
+use anime::{AniInfo, AniMinInfo, Follows, Updates, ANIME_RAW, ANIME_RSS};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 type HandlerResult = std::result::Result<(), Box<dyn std::error::Error + Send + Sync>>;
@@ -57,7 +58,6 @@ static UPDATES_FILE: &str = "anime-updates.json";
 
 #[tokio::main]
 async fn main() {
-    log::info!("Starting command bot...");
     let bot = Bot::from_env();
     Dispatcher::builder(bot, schema())
         .dependencies(dptree::deps![InMemStorage::<AnimeState>::new()])
@@ -412,7 +412,12 @@ async fn check_updates(chat_id: ChatId, bot: &Bot) -> Result<()> {
     let following: Follows =
         serde_json::from_slice(&follows_content).expect("Error deserializing following json");
 
-    let eps = fetch_rss().await?;
+    let mut eps = fetch_rss().await?;
+    if eps.is_empty() {
+        println!("switich to scraper");
+        log::info!("switching to scraper");
+        eps = scrap_updates().await?;
+    }
     // we care about the ones that we are following, and out of those, the new updates
     let mut store_update: HashMap<&String, &AniMinInfo> = HashMap::new();
     let mut message_update: HashMap<&String, &AniMinInfo> = HashMap::new();
@@ -473,22 +478,132 @@ async fn sync_updates(mut updates: Updates, notify: HashMap<&String, &AniMinInfo
     Ok(())
 }
 
-async fn fetch_rss() -> Result<HashMap<String, AniMinInfo>> {
+async fn _fetch_url(url: &str) -> Result<String> {
     let https = HttpsConnector::new();
     let client = Client::builder().build::<_, hyper::Body>(https);
-    let uri = ANIME_RSS.parse()?;
+    let uri = url.parse()?;
     let mut resp = client.get(uri).await.expect("Error fetching RSS");
     let mut stuff = String::new();
     while let Some(next) = resp.data().await {
         let chunk = next?;
         stuff.push_str(str::from_utf8(&chunk)?);
     }
+    Ok(stuff)
+}
+
+async fn scrap_updates() -> Result<HashMap<String, AniMinInfo>> {
     let mut updates: HashMap<String, AniMinInfo> = HashMap::new();
-    let maybe_feed = parser::parse(stuff.as_bytes());
-    if maybe_feed.is_err() {
-        return Ok(updates);
+    let html_content = match _fetch_url(ANIME_RAW).await {
+        Ok(val) => val,
+        Err(e) => {
+            log::error!("unable to fetch {}: {}", ANIME_RAW, e);
+            return Ok(updates);
+        }
+    };
+    let document = scraper::Html::parse_document(&html_content);
+    let select_last_eps = Selector::parse("div.last_episodes").unwrap();
+    let result = match document.select(&select_last_eps).next() {
+        Some(r) => r,
+        None => {
+            log::error!("'div.last_episodes' selector did not find a match");
+            return Ok(updates);
+        }
+    };
+    let select_items = Selector::parse("li").unwrap();
+    let re_episode = Regex::new(r"Episode ([\d\D]+)").unwrap();
+    let re_href = Regex::new(r"/([[a-z]-[0-9]]+)-episode-[[:digit:]]+").unwrap();
+    for item in result.select(&select_items) {
+        let select_episode = Selector::parse("p.episode").unwrap();
+        let ep = match item.select(&select_episode).next() {
+            Some(r) => r,
+            None => {
+                log::error!("'p.episode' selector did not find a match");
+                return Ok(updates);
+            }
+        };
+        let episode = match ep.text().collect::<Vec<_>>().first() {
+            Some(e) => {
+                let mut ret = e.to_string();
+                if e.starts_with("\"") {
+                    ret = ret.chars().skip(1).collect();
+                }
+                if ret.ends_with("\"") {
+                    ret = ret.chars().skip(ret.len()).collect();
+                }
+                ret
+            }
+            None => continue,
+        };
+
+        let select_name_url = Selector::parse("p.name").unwrap();
+        let name_url = match item.select(&select_name_url).next() {
+            Some(r) => r,
+            None => {
+                log::error!("'p.name' selector did not find a match");
+                continue;
+            }
+        };
+        let fragment = Html::parse_fragment(&name_url.inner_html());
+        let select_a = Selector::parse("a").unwrap();
+        let a = match fragment.select(&select_a).next() {
+            Some(r) => r,
+            None => {
+                log::error!("'a' selector did not find a match");
+                continue;
+            }
+        };
+        let href = match a.value().attr("href") {
+            Some(r) => {
+                if let Some(rr) = re_href.captures(&r) {
+                    let stuff = rr.get(1).map_or("", |m| m.as_str());
+                    stuff
+                } else {
+                    continue;
+                }
+            }
+            None => {
+                log::error!("couldn't extract href from element {}", a.inner_html());
+                continue;
+            }
+        };
+        let title = match a.value().attr("title") {
+            Some(r) => r,
+            None => {
+                log::error!("couldn't extract title from element {}", a.inner_html());
+                continue;
+            }
+        };
+        if let Some(ep) = re_episode.captures(&episode) {
+            let last_episode = ep.get(1).map_or("", |m| m.as_str());
+            let last_episode = match last_episode.parse::<i16>() {
+                Ok(r) => r,
+                Err(e) => {
+                    log::error!("error parsing episode {}: {}", last_episode, e);
+                    continue;
+                }
+            };
+            let ani = AniMinInfo {
+                name: String::from(title),
+                last_episode,
+            };
+            println!("Result: {:x}, {:?}", md5::compute(href), ani);
+            updates.insert(format!("{:x}", md5::compute(href)), ani);
+        }
     }
-    let feed = maybe_feed.unwrap();
+    Ok(updates)
+}
+
+async fn fetch_rss() -> Result<HashMap<String, AniMinInfo>> {
+    let mut updates: HashMap<String, AniMinInfo> = HashMap::new();
+
+    let feed = match _fetch_url(ANIME_RSS).await {
+        Ok(val) => match parser::parse(val.as_bytes()) {
+            Ok(f) => f,
+            Err(_) => return Ok(updates),
+        },
+        Err(_) => return Ok(updates),
+    };
+
     let re = Regex::new(r"([\w\W\s]+) - Episode ([\d\D]+)").unwrap();
     for et in feed.entries {
         if let Some(info) = re.captures(&et.title.unwrap().content) {

@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::fmt::Display;
 
 pub const ANIME_RSS: &str = "https://raw.githubusercontent.com/ArjixGamer/gogoanime-rss/main/gogoanime/gogoanime-rss-sub.xml";
+pub const ANIME_RAW: &str = "https://gogoanime3.co/";
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Follows {
