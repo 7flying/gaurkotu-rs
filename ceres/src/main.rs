@@ -718,4 +718,11 @@ mod tests {
         assert_eq!(gen_updates, json_updates);
         Ok(())
     }
+
+    #[tokio::test]
+    async fn test_scraping() -> Result<()> {
+        let updates = scrap_updates().await?;
+        assert_eq!(updates.len(), 20);
+        Ok(())
+    }
 }
